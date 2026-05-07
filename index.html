@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>EcoSync Command Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet"/>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--neon:#39FF14;--bg:#0a0a0f;--card:#12121a;--border:#1e1e2e;--text:#e0e0e0;--dim:#888}
+body{background:var(--bg);color:var(--text);font-family:'Share Tech Mono',monospace;overflow-x:hidden}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#0a0a0f}::-webkit-scrollbar-thumb{background:var(--neon)}
+
+/* SIDEBAR */
+#sidebar{position:fixed;left:0;top:0;width:240px;height:100vh;background:linear-gradient(180deg,#0d0d15,#111118);border-right:1px solid var(--neon);padding:16px;overflow-y:auto;z-index:100}
+.bella-banner{text-align:center;padding:8px;font-family:'Orbitron';font-size:0.75rem;color:var(--neon);letter-spacing:3px;border-bottom:1px solid #39FF1444;margin-bottom:12px;text-shadow:0 0 8px #39FF1466}
+.sidebar-title{font-family:'Orbitron';font-size:1.1rem;color:var(--neon);text-shadow:0 0 12px #39FF1466;margin:8px 0 2px}
+.sidebar-sub{color:var(--dim);font-size:0.7rem;margin-bottom:12px}
+.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
+.status-row{display:flex;justify-content:space-between;align-items:center;margin:4px 0;font-size:0.72rem}
+.status-label{color:var(--dim)}
+.badge{padding:2px 6px;border-radius:3px;font-size:0.65rem;background:#1a2a1a;color:var(--neon);border:1px solid #39FF1433}
+.badge.demo{background:#2a1a00;color:#ffaa00;border-color:#ffaa0033}
+.ctrl-label{font-size:0.72rem;color:var(--dim);margin:6px 0 3px;display:block}
+input[type=range]{width:100%;accent-color:var(--neon);cursor:pointer}
+.range-val{color:var(--neon);font-size:0.7rem;float:right}
+.toggle-btn{width:100%;padding:7px;background:transparent;border:1px solid var(--neon);color:var(--neon);font-family:'Share Tech Mono';font-size:0.75rem;cursor:pointer;border-radius:4px;letter-spacing:1px;transition:all .2s;margin-top:6px}
+.toggle-btn:hover,.toggle-btn.active{background:var(--neon);color:#0a0a0f}
+
+/* MAIN */
+#main{margin-left:240px;padding:16px;min-height:100vh}
+.top-banner{text-align:center;padding:8px;font-family:'Orbitron';font-size:0.8rem;color:var(--neon);letter-spacing:4px;border-bottom:1px solid #39FF1433;margin-bottom:14px;text-shadow:0 0 10px #39FF1466}
+
+/* METRICS ROW */
+.metrics-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.metric-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;box-shadow:0 0 12px #39FF1411;text-align:center}
+.metric-card .m-label{color:var(--dim);font-size:0.65rem;letter-spacing:1px;text-transform:uppercase}
+.metric-card .m-value{font-family:'Orbitron';font-size:1.4rem;color:var(--neon);text-shadow:0 0 10px #39FF1488;margin:4px 0}
+
+/* GRID ROWS */
+.row{display:grid;gap:12px;margin-bottom:12px}
+.row-2-3{grid-template-columns:3fr 2fr}
+.row-equal{grid-template-columns:1fr 1fr}
+
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;box-shadow:0 0 15px #39FF1411}
+.card-title{font-family:'Orbitron';font-size:0.78rem;color:var(--neon);letter-spacing:2px;margin-bottom:10px;text-shadow:0 0 8px #39FF1444}
+
+/* LIVE FEED CANVAS */
+#feedCanvas{width:100%;border-radius:6px;display:block;background:#0d0f0d}
+
+/* IMPACT METER */
+.impact-mega{font-family:'Orbitron';font-size:3.2rem;font-weight:900;color:var(--neon);text-align:center;text-shadow:0 0 30px #39FF14aa,0 0 60px #39FF1444;padding:14px 0;animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.82}}
+.impact-sub{text-align:center;color:var(--dim);font-size:0.65rem;letter-spacing:1px;margin-top:-6px}
+.impact-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.im-card{background:#0d0d15;border:1px solid var(--border);border-radius:6px;padding:8px;text-align:center}
+.im-pct{font-family:'Orbitron';font-size:1.2rem;color:var(--neon)}
+.im-abs{font-size:0.65rem;color:var(--dim)}
+.im-lbl{font-size:0.62rem;color:#666;letter-spacing:1px;margin-top:2px}
+
+/* LOG */
+#logContainer{height:280px;overflow-y:auto}
+.log-entry{font-size:0.72rem;padding:5px 8px;margin:3px 0;border-left:3px solid var(--neon);background:#0d0d1a;border-radius:0 4px 4px 0;line-height:1.5}
+.log-t{color:var(--dim)}
+.log-act{color:var(--neon);font-weight:bold}
+
+/* HEATMAP */
+#heatmapGrid{display:grid;grid-template-columns:60px repeat(3,1fr);grid-template-rows:repeat(4,1fr);gap:4px;height:180px}
+.hm-label{display:flex;align-items:center;justify-content:flex-end;padding-right:8px;font-size:0.7rem;color:var(--dim)}
+.hm-cell{border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:#fff;font-family:'Orbitron';transition:background .4s}
+
+/* CHART containers */
+.chart-wrap{position:relative;height:260px}
+
+/* PULSE dot */
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--neon);box-shadow:0 0 6px var(--neon);animation:pulse .8s ease-in-out infinite;margin-right:6px}
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<aside id="sidebar">
+  <div class="bella-banner">🎯 BELLA CIAO PROTOCOL 🎯</div>
+  <div class="sidebar-title">⚡ ECOSYNC</div>
+  <div class="sidebar-sub">Hybrid YOLO-LSTM-RL Traffic AI</div>
+  <hr class="divider"/>
+  <div style="font-family:'Orbitron';font-size:0.68rem;color:var(--neon);margin-bottom:6px;letter-spacing:1px">SYSTEM STATUS</div>
+  <div class="status-row"><span class="status-label">Phase 1 · Sim/TraCI</span><span class="badge demo">⚠ Demo</span></div>
+  <div class="status-row"><span class="status-label">Phase 2 · YOLOv8</span><span class="badge demo">⚠ Demo</span></div>
+  <div class="status-row"><span class="status-label">Phase 3 · LSTM Oracle</span><span class="badge demo">⚠ Demo</span></div>
+  <div class="status-row"><span class="status-label">Phase 4 · DQN Agent</span><span class="badge demo">⚠ Demo</span></div>
+  <hr class="divider"/>
+  <span class="ctrl-label">Target FPS <span class="range-val" id="fpsVal">10</span></span>
+  <input type="range" id="fpsSlider" min="1" max="30" value="10"/>
+  <button class="toggle-btn active" id="liveBtn" onclick="toggleLive()">🔴 LIVE FEED ON</button>
+  <hr class="divider"/>
+  <div style="font-family:'Orbitron';font-size:0.68rem;color:var(--neon);margin-bottom:6px;letter-spacing:1px">REWARD WEIGHTS</div>
+  <span class="ctrl-label">W₁ WaitTime <span class="range-val" id="w1Val">0.50</span></span>
+  <input type="range" id="w1" min="0" max="1" step="0.05" value="0.50" oninput="document.getElementById('w1Val').textContent=parseFloat(this.value).toFixed(2)"/>
+  <span class="ctrl-label">W₂ Emissions <span class="range-val" id="w2Val">0.30</span></span>
+  <input type="range" id="w2" min="0" max="1" step="0.05" value="0.30" oninput="document.getElementById('w2Val').textContent=parseFloat(this.value).toFixed(2)"/>
+  <span class="ctrl-label">W₃ JamRisk <span class="range-val" id="w3Val">0.20</span></span>
+  <input type="range" id="w3" min="0" max="1" step="0.05" value="0.20" oninput="document.getElementById('w3Val').textContent=parseFloat(this.value).toFixed(2)"/>
+</aside>
+
+<!-- MAIN -->
+<main id="main">
+  <div class="top-banner">◆ ECOSYNC COMMAND CENTER — THE VICTORY DASHBOARD ◆</div>
+
+  <!-- STATUS METRICS -->
+  <div class="metrics-row">
+    <div class="metric-card"><div class="m-label">⏱ Sim Step</div><div class="m-value" id="mStep">0</div></div>
+    <div class="metric-card"><div class="m-label">🎯 FPS Target</div><div class="m-value" id="mFps">10</div></div>
+    <div class="metric-card"><div class="m-label">🧠 Oracle Mode</div><div class="m-value" id="mOracle" style="font-size:0.95rem;padding-top:6px">WARMUP</div></div>
+    <div class="metric-card"><div class="m-label">🤖 Agent ε</div><div class="m-value" id="mEps">1.000</div></div>
+  </div>
+
+  <!-- ROW 1: Live Feed + Impact -->
+  <div class="row row-2-3">
+    <div class="card">
+      <div class="card-title"><span class="dot"></span>📡 THE LIVE HEIST FEED</div>
+      <canvas id="feedCanvas" height="320"></canvas>
+      <div style="text-align:center;color:var(--dim);font-size:0.65rem;margin-top:6px" id="feedCaption">EcoSync Perception | Frame 0</div>
+    </div>
+    <div class="card">
+      <div class="card-title">🏆 THE IMPACT METER</div>
+      <div style="color:var(--dim);font-size:0.65rem;text-align:center;letter-spacing:2px">TOTAL ENVIRONMENTAL IMPACT SAVED</div>
+      <div class="impact-mega" id="impactVal">0.0</div>
+      <div class="impact-sub">0.50·ΔWait + 0.30·ΔEmissions + 0.20·ΔJamRisk</div>
+      <div class="impact-metrics">
+        <div class="im-card"><div class="im-pct" id="waitPct">0.0%</div><div class="im-abs" id="waitAbs">-0s</div><div class="im-lbl">WAIT ↓</div></div>
+        <div class="im-card"><div class="im-pct" id="emPct">0.0%</div><div class="im-abs" id="emAbs">-0</div><div class="im-lbl">CO₂ ↓</div></div>
+        <div class="im-card"><div class="im-pct" id="jamPct">0.0%</div><div class="im-abs" id="jamAbs">-0</div><div class="im-lbl">JAM ↓</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 2: Oracle Chart + Strategist Log -->
+  <div class="row row-2-3">
+    <div class="card">
+      <div class="card-title">🔮 THE ORACLE'S EYE — LSTM Density Forecast</div>
+      <div class="chart-wrap"><canvas id="oracleChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">📋 STRATEGIST LOG</div>
+      <div id="logContainer"></div>
+    </div>
+  </div>
+
+  <!-- ROW 3: Heatmap -->
+  <div class="card">
+    <div class="card-title">🗺️ LANE EMISSIONS HEATMAP</div>
+    <div id="heatmapGrid">
+      <div></div><div style="text-align:center;color:var(--dim);font-size:0.65rem;padding:4px">Lane 0</div><div style="text-align:center;color:var(--dim);font-size:0.65rem;padding:4px">Lane 1</div><div style="text-align:center;color:var(--dim);font-size:0.65rem;padding:4px">Lane 2</div>
+      <div class="hm-label">North</div><div class="hm-cell" id="hm-N0"></div><div class="hm-cell" id="hm-N1"></div><div class="hm-cell" id="hm-N2"></div>
+      <div class="hm-label">South</div><div class="hm-cell" id="hm-S0"></div><div class="hm-cell" id="hm-S1"></div><div class="hm-cell" id="hm-S2"></div>
+      <div class="hm-label">East</div><div class="hm-cell" id="hm-E0"></div><div class="hm-cell" id="hm-E1"></div><div class="hm-cell" id="hm-E2"></div>
+      <div class="hm-label">West</div><div class="hm-cell" id="hm-W0"></div><div class="hm-cell" id="hm-W1"></div><div class="hm-cell" id="hm-W2"></div>
+    </div>
+    <div id="hmLegend" style="display:flex;justify-content:center;gap:16px;margin-top:8px;font-size:0.65rem;color:var(--dim)">
+      <span>■ <span style="color:#39FF14">Low</span></span>
+      <span>■ <span style="color:#ffaa00">Medium</span></span>
+      <span>■ <span style="color:#ff4444">High</span></span>
+    </div>
+  </div>
+</main>
+
+<script>
+// ── Oracle Chart ────────────────────────────────────────────────────────────
+const oCtx = document.getElementById('oracleChart').getContext('2d');
+const oracleChart = new Chart(oCtx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      { label: 'Actual Density', data: [], borderColor: '#00ff88', borderWidth: 2,
+        fill: true, backgroundColor: 'rgba(0,255,136,0.06)', tension: 0.4, pointRadius: 0 },
+      { label: 'Predicted (5-step ahead)', data: [], borderColor: '#ff4444', borderWidth: 2,
+        borderDash: [6,3], fill: true, backgroundColor: 'rgba(255,68,68,0.04)', tension: 0.4, pointRadius: 0 }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    plugins: { legend: { labels: { color: '#e0e0e0', font: { family: 'Share Tech Mono', size: 11 } } } },
+    scales: {
+      x: { ticks: { color: '#888', maxTicksLimit: 8, font: { size: 9 } }, grid: { color: '#1e1e2e' } },
+      y: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#1e1e2e' } }
+    }
+  }
+});
+
+// ── Live Feed Canvas ─────────────────────────────────────────────────────────
+const fCanvas = document.getElementById('feedCanvas');
+const fCtx = fCanvas.getContext('2d');
+fCanvas.width = fCanvas.offsetWidth || 640;
+fCanvas.height = 320;
+
+function rnd(a, b) { return Math.floor(Math.random() * (b - a) + a); }
+
+function drawFeed(step) {
+  const W = fCanvas.width, H = fCanvas.height;
+  fCtx.fillStyle = '#0d0f0b';
+  fCtx.fillRect(0, 0, W, H);
+  const cx = W / 2, cy = H / 2;
+  fCtx.strokeStyle = '#1e2a1e';
+  fCtx.lineWidth = 1;
+  fCtx.beginPath(); fCtx.moveTo(cx, 0); fCtx.lineTo(cx, H); fCtx.stroke();
+  fCtx.beginPath(); fCtx.moveTo(0, cy); fCtx.lineTo(W, cy); fCtx.stroke();
+
+  // road markings
+  fCtx.strokeStyle = '#2a3a2a';
+  for (let i = 0; i < 4; i++) {
+    fCtx.strokeRect(cx - 90 + i * 40, cy - 90, 30, 30);
+  }
+
+  // vehicles
+  const n = rnd(5, 15);
+  for (let i = 0; i < n; i++) {
+    const x = rnd(20, W - 50), y = rnd(20, H - 40);
+    const bw = rnd(20, 45), bh = rnd(14, 28);
+    const conf = rnd(50, 99);
+    fCtx.strokeStyle = '#39FF14';
+    fCtx.lineWidth = 1;
+    fCtx.strokeRect(x, y, bw, bh);
+    fCtx.fillStyle = 'rgba(57,255,20,0.06)';
+    fCtx.fillRect(x, y, bw, bh);
+    fCtx.fillStyle = '#39FF14';
+    fCtx.font = '9px Share Tech Mono';
+    fCtx.fillText(`car ${conf}%`, x, y - 2);
+  }
+
+  // HUD
+  fCtx.fillStyle = '#39FF14';
+  fCtx.font = 'bold 11px Share Tech Mono';
+  fCtx.fillText(`ECOSYNC LIVE | T=${String(step).padStart(4,'0')}`, 10, 18);
+  fCtx.fillStyle = '#aaa';
+  fCtx.font = '10px Share Tech Mono';
+  fCtx.fillText(`Vehicles: ${n} | EmScore: ${(Math.random()*10+5).toFixed(1)}`, 10, 34);
+
+  // scan line effect
+  fCtx.fillStyle = 'rgba(57,255,20,0.015)';
+  const scanY = ((step * 4) % H);
+  fCtx.fillRect(0, scanY, W, 2);
+}
+
+// ── Heatmap helper ───────────────────────────────────────────────────────────
+function scoreToColor(v) {
+  // 0-1 → green, 1-3 → yellow, 3+ → red
+  if (v < 1) {
+    const t = v;
+    return `rgba(${Math.floor(57+t*150)},${Math.floor(255-t*100)},${Math.floor(20)},0.85)`;
+  } else if (v < 3) {
+    const t = (v - 1) / 2;
+    return `rgba(${Math.floor(207+t*48)},${Math.floor(155-t*87)},20,0.85)`;
+  } else {
+    return `rgba(255,68,68,0.85)`;
+  }
+}
+
+const hmIds = {
+  'N_in_0':'hm-N0','N_in_1':'hm-N1','N_in_2':'hm-N2',
+  'S_in_0':'hm-S0','S_in_1':'hm-S1','S_in_2':'hm-S2',
+  'E_in_0':'hm-E0','E_in_1':'hm-E1','E_in_2':'hm-E2',
+  'W_in_0':'hm-W0','W_in_1':'hm-W1','W_in_2':'hm-W2',
+};
+
+function updateHeatmap(laneData) {
+  for (const [lid, elId] of Object.entries(hmIds)) {
+    const el = document.getElementById(elId);
+    const d = laneData[lid] || {};
+    const score = d.emissions_score || 0;
+    el.style.background = scoreToColor(score);
+    el.textContent = score.toFixed(1);
+  }
+}
+
+// ── State management ─────────────────────────────────────────────────────────
+let liveRunning = true;
+let currentStep = 0;
+
+function toggleLive() {
+  liveRunning = !liveRunning;
+  const btn = document.getElementById('liveBtn');
+  btn.textContent = liveRunning ? '🔴 LIVE FEED ON' : '⏸ PAUSED';
+  btn.classList.toggle('active', liveRunning);
+  fetch('/api/control', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({running: liveRunning})
+  });
+}
+
+document.getElementById('fpsSlider').addEventListener('input', function() {
+  document.getElementById('fpsVal').textContent = this.value;
+  document.getElementById('mFps').textContent = this.value;
+});
+
+// ── Main poll loop ───────────────────────────────────────────────────────────
+async function poll() {
+  try {
+    const res = await fetch('/api/state');
+    const d = await res.json();
+
+    currentStep = d.step;
+    document.getElementById('mStep').textContent = d.step.toLocaleString();
+    document.getElementById('mOracle').textContent = d.oracle_mode;
+    document.getElementById('mEps').textContent = d.agent_epsilon.toFixed(3);
+
+    document.getElementById('impactVal').textContent = d.impact_saved.toLocaleString();
+    const m = d.metrics;
+    document.getElementById('waitPct').textContent = m.wait_pct.toFixed(1) + '%';
+    document.getElementById('waitAbs').textContent = '-' + m.wait_abs.toFixed(0) + 's';
+    document.getElementById('emPct').textContent = m.emissions_pct.toFixed(1) + '%';
+    document.getElementById('emAbs').textContent = '-' + m.emissions_abs.toFixed(0);
+    document.getElementById('jamPct').textContent = m.jam_pct.toFixed(1) + '%';
+    document.getElementById('jamAbs').textContent = '-' + m.jam_abs.toFixed(1);
+
+    // Oracle chart
+    const actual = d.density.actual;
+    const predicted = d.density.predicted;
+    if (actual.length > 5) {
+      oracleChart.data.labels = actual.map((_, i) => i);
+      oracleChart.data.datasets[0].data = actual;
+      const predLabels = predicted.map((_, i) => i + 5);
+      oracleChart.data.datasets[1].data = predicted;
+      oracleChart.update('none');
+    }
+
+    // Log
+    const logs = d.log_entries.slice().reverse();
+    const logHtml = logs.map(e =>
+      `<div class="log-entry"><span class="log-t">[T=${String(e.step).padStart(4,'0')}]</span> <span class="log-act">RL Action: ${e.action}</span> | ${e.reason}</div>`
+    ).join('');
+    document.getElementById('logContainer').innerHTML = logHtml;
+
+    // Heatmap
+    updateHeatmap(d.lane_data);
+
+    // Live feed
+    drawFeed(d.step);
+    document.getElementById('feedCaption').textContent = `EcoSync Perception | Frame ${d.step}`;
+
+  } catch(e) {
+    // server not ready yet
+  }
+}
+
+// adaptive polling based on FPS slider
+function scheduleNext() {
+  const fps = parseInt(document.getElementById('fpsSlider').value) || 10;
+  setTimeout(async () => {
+    await poll();
+    scheduleNext();
+  }, 1000 / fps);
+}
+
+scheduleNext();
+</script>
+</body>
+</html>
