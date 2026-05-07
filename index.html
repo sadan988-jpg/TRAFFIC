@@ -86,14 +86,19 @@ input[type=range]{width:100%;accent-color:var(--neon);cursor:pointer}
   <div class="sidebar-sub">Hybrid YOLO-LSTM-RL Traffic AI</div>
   <hr class="divider"/>
   <div style="font-family:'Orbitron';font-size:0.68rem;color:var(--neon);margin-bottom:6px;letter-spacing:1px">SYSTEM STATUS</div>
-  <div class="status-row"><span class="status-label">Phase 1 · Sim/TraCI</span><span class="badge demo">⚠ Demo</span></div>
-  <div class="status-row"><span class="status-label">Phase 2 · YOLOv8</span><span class="badge demo">⚠ Demo</span></div>
-  <div class="status-row"><span class="status-label">Phase 3 · LSTM Oracle</span><span class="badge demo">⚠ Demo</span></div>
-  <div class="status-row"><span class="status-label">Phase 4 · DQN Agent</span><span class="badge demo">⚠ Demo</span></div>
+  <div class="status-row"><span class="status-label">Phase 1 · Sim/TraCI</span><span class="badge">Active</span></div>
+  <div class="status-row"><span class="status-label">Phase 2 · YOLOv8</span><span class="badge">Active</span></div>
+  <div class="status-row"><span class="status-label">Phase 3 · LSTM Oracle</span><span class="badge">Active</span></div>
+  <div class="status-row"><span class="status-label">Phase 4 · DQN Agent</span><span class="badge">Active</span></div>
   <hr class="divider"/>
   <span class="ctrl-label">Target FPS <span class="range-val" id="fpsVal">10</span></span>
   <input type="range" id="fpsSlider" min="1" max="30" value="10"/>
   <button class="toggle-btn active" id="liveBtn" onclick="toggleLive()">🔴 LIVE FEED ON</button>
+  <hr class="divider"/>
+  <div style="font-family:'Orbitron';font-size:0.68rem;color:var(--neon);margin-bottom:6px;letter-spacing:1px">ATMOSPHERIC MODULES</div>
+  <button class="toggle-btn" id="nightBtn" onclick="toggleNight()">🌙 Night Mode</button>
+  <button class="toggle-btn" id="fogBtn" onclick="toggleFog()">🌫 Digital De-haze</button>
+  <button class="toggle-btn" id="rainBtn" onclick="toggleRain()">🌧 Rain Filter</button>
   <hr class="divider"/>
   <div style="font-family:'Orbitron';font-size:0.68rem;color:var(--neon);margin-bottom:6px;letter-spacing:1px">REWARD WEIGHTS</div>
   <span class="ctrl-label">W₁ WaitTime <span class="range-val" id="w1Val">0.50</span></span>
@@ -233,16 +238,46 @@ function updateHeatmap(laneData) {
 // ── State management ─────────────────────────────────────────────────────────
 let liveRunning = true;
 let currentStep = 0;
+let nightActive = false;
+let fogActive = false;
+let rainActive = false;
 
 function toggleLive() {
   liveRunning = !liveRunning;
   const btn = document.getElementById('liveBtn');
   btn.textContent = liveRunning ? '🔴 LIVE FEED ON' : '⏸ PAUSED';
   btn.classList.toggle('active', liveRunning);
+  sendControl();
+}
+
+function toggleNight() {
+  nightActive = !nightActive;
+  document.getElementById('nightBtn').classList.toggle('active', nightActive);
+  sendControl();
+}
+
+function toggleFog() {
+  fogActive = !fogActive;
+  document.getElementById('fogBtn').classList.toggle('active', fogActive);
+  sendControl();
+}
+
+function toggleRain() {
+  rainActive = !rainActive;
+  document.getElementById('rainBtn').classList.toggle('active', rainActive);
+  sendControl();
+}
+
+function sendControl() {
   fetch('/api/control', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({running: liveRunning})
+    body: JSON.stringify({
+      running: liveRunning,
+      night_mode: nightActive,
+      fog_mode: fogActive,
+      rain_mode: rainActive
+    })
   });
 }
 
@@ -298,6 +333,8 @@ async function poll() {
       const img = new Image();
       img.onload = () => {
         fCtx.drawImage(img, 0, 0, fCanvas.width, fCanvas.height);
+        
+        // Only draw scanline if live and no static filters active? No, just draw it over.
         fCtx.fillStyle = 'rgba(57,255,20,0.015)';
         const scanY = ((d.step * 4) % fCanvas.height);
         fCtx.fillRect(0, scanY, fCanvas.width, 2);

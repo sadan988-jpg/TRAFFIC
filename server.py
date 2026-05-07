@@ -48,6 +48,10 @@ class PrototypeState:
         self.log_entries = []
         self.agent_epsilon = 0.0
         self.oracle_mode = "WARMUP"
+        
+        self.night_active = False
+        self.fog_active = False
+        self.rain_active = False
 
         self.total_co2_baseline = 0.0
         self.total_co2_ai = 0.0
@@ -135,6 +139,10 @@ def run_ecosync_loop():
             
         t0 = time.time()
         bridge.set_sim_time(float(strategist.env._sim_step))
+        with state.lock:
+            night, fog, rain = state.night_active, state.fog_active, state.rain_active
+        bridge.set_atmospheric_modes(night, fog, rain)
+        strategist.env.set_atmospheric_modes(night, fog, rain)
         
         action = strategist.agent.select_action(obs, training=False)
         next_obs, reward, terminated, truncated, info = strategist.env.step(action)
@@ -249,7 +257,9 @@ def run_ecosync_loop():
             state.density_predicted.append(pred_count)
             
             # Log Management
-            reason = "🚨 EMERGENCY GREEN CORRIDOR" if info.get("emergency_corridor_active") else f"Optimization (R={reward:.2f})"
+            reason = info.get("atmospheric_log", f"Optimization (R={reward:.2f})")
+            if info.get("emergency_corridor_active"):
+                reason = "🚨 EMERGENCY GREEN CORRIDOR | " + reason
             state.log_entries.append({"step": state.step, "action": cfg.PHASES.get(state.rl_phase, str(state.rl_phase)), "reason": reason})
             
             if len(state.density_actual) > 60: state.density_actual.pop(0)
@@ -269,6 +279,9 @@ threading.Thread(target=run_ecosync_loop, daemon=True).start()
 
 class ControlRequest(BaseModel):
     running: bool
+    night_mode: bool = False
+    fog_mode: bool = False
+    rain_mode: bool = False
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -293,6 +306,9 @@ async def get_state():
             "log_entries": state.log_entries,
             "lane_data": state.lane_data,
             "yolo_frame_base64": state.base64_frame,
+            "night_active": state.night_active,
+            "fog_active": state.fog_active,
+            "rain_active": state.rain_active,
             # Feature 1: Vehicle throughput & congestion
             "vehicle_throughput": state.vehicle_throughput,
             "total_vehicles_passed": state.total_vehicles_passed,
@@ -312,9 +328,13 @@ async def get_state():
 async def control_system(data: ControlRequest):
     with state.lock:
         state.running = data.running
+        state.night_active = data.night_mode
+        state.fog_active = data.fog_mode
+        state.rain_active = data.rain_mode
     # Also pause/resume the perception bridge so video stops advancing
     if _bridge is not None:
         _bridge.set_paused(not data.running)
+        _bridge.set_atmospheric_modes(data.night_mode, data.fog_mode, data.rain_mode)
     return {"running": state.running}
 
 if __name__ == "__main__":

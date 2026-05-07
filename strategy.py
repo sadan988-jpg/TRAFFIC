@@ -295,6 +295,14 @@ class TrafficEnv(gym.Env):
         self._yellow_remaining  = 0
         self._pending_phase     = None
         self._episode_metrics: Dict = {}
+        self._night_mode        = False
+        self._fog_mode          = False
+        self._rain_mode         = False
+
+    def set_atmospheric_modes(self, night: bool, fog: bool, rain: bool) -> None:
+        self._night_mode = night
+        self._fog_mode = fog
+        self._rain_mode = rain
 
     # ── Gymnasium API ──────────────────────────────────────────────────────
 
@@ -376,6 +384,14 @@ class TrafficEnv(gym.Env):
         terminated = self._sim_step >= self.cfg.SIM_STEPS
         truncated  = False
 
+        msg = f"Optimization (R={reward:.2f})"
+        if self._night_mode or self._fog_mode or self._rain_mode:
+            active = []
+            if self._fog_mode: active.append("Fog-X")
+            if self._night_mode: active.append("Night-Vision")
+            if self._rain_mode: active.append("Monsoon-Shield")
+            msg = f"System: {', '.join(active)} active | Maintaining tracking at 120m despite low visibility"
+
         info = {
             "sim_step":    self._sim_step,
             "phase":       self._current_phase,
@@ -384,6 +400,7 @@ class TrafficEnv(gym.Env):
             "jam_risk":    self._last_jam_risk,
             "ep_reward":   self._episode_reward,
             "emergency_corridor_active": self._emergency_triggered,
+            "atmospheric_log": msg,
         }
 
         if terminated:

@@ -852,6 +852,11 @@ class YOLOPerceptionEngine:
         self._last_frame_data: Optional[FrameData] = None
         self._cached_boxes:    List[BoundingBox]   = []
         self._sim_time:        float = 0.0
+        
+        self._night_mode:      bool  = False
+        self._fog_mode:        bool  = False
+        self._rain_mode:       bool  = False
+        self._rain_buffer:     List[np.ndarray] = []
 
         # Vehicle class filter — COCO IDs we care about
         self._vehicle_cls_ids: List[int] = list(VEHICLE_COCO_CLASSES.keys())
@@ -861,6 +866,11 @@ class YOLOPerceptionEngine:
             "size=%d | every=%d frames",
             conf, iou, img_size, self._inference_every,
         )
+
+    def set_atmospheric_modes(self, night: bool, fog: bool, rain: bool) -> None:
+        self._night_mode = night
+        self._fog_mode = fog
+        self._rain_mode = rain
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
@@ -970,6 +980,14 @@ class YOLOPerceptionEngine:
                 if not is_ambulance and cls_name in ("car", "bus", "truck", "motorcycle"):
                     is_ev = self._detect_ev_by_plate_color(frame, x1, y1, x2, y2)
 
+                # Night-Vision: Boost confidence if bright spots detected
+                if self._night_mode:
+                    crop = frame[max(0,int(y1)):int(y2), max(0,int(x1)):int(x2)]
+                    if crop.size > 0:
+                        gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                        if np.any(gray_crop > 200):
+                            conf = min(float(conf) + 0.3, 1.0)
+
                 boxes.append(BoundingBox(
                     x1=x1, y1=y1, x2=x2, y2=y2,
                     cx=cx, cy=cy,
@@ -1039,6 +1057,35 @@ class YOLOPerceptionEngine:
         """
         t_wall = time.time()
         h, w   = frame.shape[:2]
+
+        # Atmospheric modules
+        if self._fog_mode:
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            cl = clahe.apply(l)
+            limg = cv2.merge((cl,a,b))
+            frame = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+            
+        if self._rain_mode:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if len(self._rain_buffer) < 3:
+                self._rain_buffer = [gray, gray, gray]
+            self._rain_buffer.pop(0)
+            self._rain_buffer.append(gray)
+            d1 = cv2.absdiff(self._rain_buffer[0], self._rain_buffer[1])
+            d2 = cv2.absdiff(self._rain_buffer[1], self._rain_buffer[2])
+            mask = cv2.bitwise_and(d1, d2)
+            _, thresh = cv2.threshold(mask, 25, 255, cv2.THRESH_BINARY)
+            blurred = cv2.medianBlur(frame, 5)
+            mask_3ch = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+            frame = np.where(mask_3ch == 255, blurred, frame)
+            
+        if self._night_mode:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            _, bright_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            bright_3ch = cv2.cvtColor(bright_mask, cv2.COLOR_GRAY2BGR)
+            frame = cv2.addWeighted(frame, 0.8, bright_3ch, 0.2, 0)
 
         # ── Auto-rescale ROIs if frame size changed ────────────────────────
         if (w, h) != (self._roi._fw, self._roi._fh):
@@ -1266,6 +1313,9 @@ class PerceptionBridge:
             self._pause_event.set()
         else:
             self._pause_event.clear()
+
+    def set_atmospheric_modes(self, night: bool, fog: bool, rain: bool) -> None:
+        self._engine.set_atmospheric_modes(night, fog, rain)
 
     # ── Background capture loop ───────────────────────────────────────────────
 
