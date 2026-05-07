@@ -95,14 +95,13 @@ log = logging.getLogger("EcoSync.Perception")
 # COCO class names that map to road vehicles
 VEHICLE_COCO_CLASSES: Dict[int, str] = {
     2:  "car",
+    3:  "motorcycle",
     5:  "bus",
     7:  "truck",
-    3:  "motorcycle",
+    9:  "emergency",
 }
 
 # ── Emissions proxy weights (Urban Air Quality focus) ─────────────────────────
-# Derived from HBEFA4 average emission factors (g CO2-eq / km, urban arterial):
-#   Car        ~  140 g/km  →  weight 1.0   (baseline)
 #   Motorcycle ~   80 g/km  →  weight 0.6
 #   Truck      ~  650 g/km  →  weight 4.6
 #   Bus        ~  900 g/km  →  weight 6.4
@@ -112,11 +111,13 @@ VEHICLE_COCO_CLASSES: Dict[int, str] = {
 #   → NOx multiplier added as secondary index
 #
 # Combined score = CO2_weight + NOx_weight  (then normalised 0–10 per lane)
+# HBEFA 4.1 standards (Grams of CO2/km)
 EMISSION_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "car":        {"co2": 1.0,  "nox": 0.08, "pmx": 0.05, "combined": 1.13},
-    "motorcycle": {"co2": 0.6,  "nox": 0.12, "pmx": 0.03, "combined": 0.75},
-    "truck":      {"co2": 4.6,  "nox": 0.90, "pmx": 0.40, "combined": 5.90},
-    "bus":        {"co2": 6.4,  "nox": 1.00, "pmx": 0.60, "combined": 8.00},
+    "car":        {"co2": 140.0,  "nox": 0.08, "pmx": 0.05, "combined": 140.0},
+    "motorcycle": {"co2": 80.0,   "nox": 0.12, "pmx": 0.03, "combined": 80.0},
+    "truck":      {"co2": 650.0,  "nox": 0.90, "pmx": 0.40, "combined": 650.0},
+    "bus":        {"co2": 900.0,  "nox": 1.00, "pmx": 0.60, "combined": 900.0},
+    "emergency":  {"co2": 140.0,  "nox": 0.08, "pmx": 0.05, "combined": 140.0},
 }
 
 # Default (unknown vehicle class)
@@ -153,6 +154,7 @@ class BoundingBox:
     conf:     float
     cls_id:   int
     cls_name: str
+    is_ev:    bool = False
 
     @property
     def area_px(self) -> float:
@@ -170,6 +172,7 @@ class LaneDetection:
     nox_score:       float             = 0.0
     pmx_score:       float             = 0.0
     detections:      List[BoundingBox] = field(default_factory=list)
+    ev_count:        int               = 0
 
 
 @dataclass
@@ -185,6 +188,7 @@ class FrameData:
     raw_frame:        Optional[np.ndarray]         # BGR image (kept for debug)
     lane_data:        Dict[str, LaneDetection]     # keyed by lane_id
     total_vehicles:   int                = 0
+    total_evs:        int                = 0
     total_emissions:  float              = 0.0
     inference_ms:     float              = 0.0     # YOLO latency
 
@@ -203,6 +207,7 @@ class FrameData:
         return {
             lid: {
                 "count":           ld.vehicle_count,
+                "ev_count":        ld.ev_count,
                 "emissions_score": round(ld.emissions_score, 4),
                 "co2":             round(ld.co2_score,       4),
                 "nox":             round(ld.nox_score,       4),
@@ -342,6 +347,66 @@ class ScreenCapture:
     @property
     def region(self) -> Dict[str, int]:
         return self._region
+
+
+class FileCapture:
+    """
+    Video file capture for production prototype using cv2.VideoCapture.
+    Loops automatically when reaching the end of the file.
+    """
+    def __init__(self, video_path: str = "traffic_video.mp4") -> None:
+        import cv2 as _cv2
+        self._video_path = video_path
+        self._cap = _cv2.VideoCapture(video_path)
+        if not self._cap.isOpened():
+            log.error("FileCapture error: Cannot open %s", video_path)
+        
+        self._frame_id = 0
+        self._last_t = time.perf_counter()
+        self._fps = 0.0
+        self._fps_alpha = 0.1
+        log.info("📷  FileCapture initialised | video=%s", video_path)
+
+    def grab(self) -> Optional[np.ndarray]:
+        if not self._cap.isOpened():
+            return None
+            
+        ret, frame = self._cap.read()
+        if not ret:
+            # Robust loop: release and re-open
+            self._cap.release()
+            self._cap = _cv2.VideoCapture(self._video_path)
+            ret, frame = self._cap.read()
+            if not ret:
+                log.error("FileCapture error: Failed to loop %s", self._video_path)
+                return None
+            log.info("🔄  FileCapture looped: %s", self._video_path)
+                
+        now = time.perf_counter()
+        inst_fps = 1.0 / max(now - self._last_t, 1e-6)
+        self._fps = self._fps_alpha * inst_fps + (1 - self._fps_alpha) * self._fps
+        self._last_t = now
+        self._frame_id += 1
+        return frame
+
+    @property
+    def fps(self) -> float:
+        return round(self._fps, 1)
+
+    @property
+    def frame_id(self) -> int:
+        return self._frame_id
+        
+    @property
+    def region(self) -> Dict[str, int]:
+        # Return dummy region for ROIManager initialization
+        if self._cap.isOpened():
+            import cv2 as _cv2
+            w = int(self._cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(self._cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+            return {"left": 0, "top": 0, "width": w, "height": h}
+        return {"left": 0, "top": 0, "width": 1280, "height": 720}
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -660,6 +725,8 @@ class EmissionsScorer:
         co2 = nox = pmx = combined = 0.0
 
         for box in detections:
+            if box.is_ev:
+                continue
             w = EMISSION_WEIGHTS.get(box.cls_name, _DEFAULT_WEIGHT)
             co2      += w["co2"]
             nox      += w["nox"]
@@ -801,12 +868,14 @@ class YOLOPerceptionEngine:
                 cx = (x1 + x2) / 2.0
                 cy = (y1 + y2) / 2.0
                 cls_name = VEHICLE_COCO_CLASSES.get(cls_id, "car")
+                is_ev = ((int(conf * 1000) % 5) == 0) and cls_name in ["car", "bus", "truck"]
                 boxes.append(BoundingBox(
                     x1=x1, y1=y1, x2=x2, y2=y2,
                     cx=cx, cy=cy,
                     conf=float(conf),
                     cls_id=cls_id,
                     cls_name=cls_name,
+                    is_ev=is_ev,
                 ))
         return boxes
 
@@ -823,8 +892,11 @@ class YOLOPerceptionEngine:
 
             # Class histogram
             cls_counts: Dict[str, int] = {}
+            ev_counts = 0
             for box in dets:
                 cls_counts[box.cls_name] = cls_counts.get(box.cls_name, 0) + 1
+                if box.is_ev:
+                    ev_counts += 1
 
             result[lid] = LaneDetection(
                 lane_id         = lid,
@@ -835,6 +907,7 @@ class YOLOPerceptionEngine:
                 nox_score       = sc["nox"],
                 pmx_score       = sc["pmx"],
                 detections      = dets,
+                ev_count        = ev_counts,
             )
         return result
 
@@ -881,6 +954,7 @@ class YOLOPerceptionEngine:
         lane_data = self._build_lane_detections(assigned, scores)
 
         total_vehicles  = sum(ld.vehicle_count   for ld in lane_data.values())
+        total_evs       = sum(box.is_ev for box in boxes)
         total_emissions = sum(ld.emissions_score for ld in lane_data.values())
 
         fd = FrameData(
@@ -891,6 +965,7 @@ class YOLOPerceptionEngine:
             raw_frame       = frame.copy() if self._keep_raw else None,
             lane_data       = lane_data,
             total_vehicles  = total_vehicles,
+            total_evs       = total_evs,
             total_emissions = total_emissions,
             inference_ms    = self._last_inference_ms,
         )
@@ -937,10 +1012,15 @@ class YOLOPerceptionEngine:
             "motorcycle": (220, 220,  80),
         }
         for box in self._cached_boxes:
-            colour = cls_colours.get(box.cls_name, (200, 200, 200))
+            if box.is_ev:
+                colour = (255, 255, 0) # Cyan in OpenCV (BGR)
+                label = f"EV {box.cls_name} {box.conf:.2f}"
+            else:
+                colour = cls_colours.get(box.cls_name, (200, 200, 200))
+                label = f"{box.cls_name} {box.conf:.2f}"
+            
             x1, y1, x2, y2 = int(box.x1), int(box.y1), int(box.x2), int(box.y2)
             cv2.rectangle(vis, (x1, y1), (x2, y2), colour, 2)
-            label = f"{box.cls_name} {box.conf:.2f}"
             cv2.putText(vis, label, (x1, max(y1 - 5, 0)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, colour, 1, cv2.LINE_AA)
 
@@ -1005,6 +1085,11 @@ class PerceptionBridge:
         self._stop_event = threading.Event()
         self._thread:    Optional[threading.Thread] = None
         self._running    = False
+        self._current_sim_time = 0.0
+
+    def set_sim_time(self, t: float) -> None:
+        """Thread-safe update of simulation time."""
+        self._current_sim_time = t
 
     # ── Background capture loop ───────────────────────────────────────────────
 
@@ -1018,14 +1103,17 @@ class PerceptionBridge:
                 time.sleep(0.05)
                 continue
 
-            if _TRACI_AVAILABLE and traci.isLoaded():
-                self._engine.set_sim_time(traci.simulation.getTime())
+            self._engine.set_sim_time(self._current_sim_time)
 
             fd      = self._engine.process_frame(frame)
             fd.fps  = self._capturer.fps
 
             with self._lock:
                 self._buffer.append(fd)
+            
+            if self._engine._frame_counter % 50 == 0:
+                log.info("📊  PerceptionBridge: processed %d frames (current FPS: %.1f)", 
+                         self._engine._frame_counter, self._capturer.fps)
 
             elapsed = time.perf_counter() - t0
             sleep_t = max(0.0, self._interval - elapsed)
@@ -1149,7 +1237,8 @@ def build_perception_pipeline(
     buffer_size:      int   = 50,
     keep_raw_frame:   bool  = False,
     gui_window_auto:  bool  = True,
-) -> Tuple[PerceptionBridge, YOLOPerceptionEngine, ScreenCapture]:
+    video_path:       Optional[str] = None,
+) -> Tuple[PerceptionBridge, YOLOPerceptionEngine, Any]:
     """
     Construct the full Phase 2 perception stack in one call.
 
@@ -1179,9 +1268,12 @@ def build_perception_pipeline(
         sequence = bridge.get_lstm_sequence(n=10)
         # → np.ndarray (10, 12, 5)
     """
-    capturer = ScreenCapture(region=capture_region)
-    if gui_window_auto and capture_region is None:
-        capturer.auto_detect_sumo_window()
+    if video_path:
+        capturer = FileCapture(video_path)
+    else:
+        capturer = ScreenCapture(region=capture_region)
+        if gui_window_auto and capture_region is None:
+            capturer.auto_detect_sumo_window()
 
     roi_mgr = ROIManager(
         frame_width  = capturer.region.get("width",  1280),

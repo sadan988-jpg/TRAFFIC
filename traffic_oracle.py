@@ -252,7 +252,8 @@ class RunningNormaliser:
     def std(self) -> np.ndarray:
         if self.n < 2:
             return np.ones_like(self.mean)
-        return np.sqrt(self.M2 / (self.n - 1) + self.eps)
+        var = self.M2 / (self.n - 1)
+        return np.maximum(np.sqrt(var), self.eps)
 
     def normalise(self, x: np.ndarray) -> np.ndarray:
         return ((x - self.mean) / self.std).astype(np.float32)

@@ -319,6 +319,8 @@ class TrafficEnv(gym.Env):
             "total_jam_risk":  0.0,
             "steps":           0,
         }
+        self._emergency_wait_tracker = {lid: 0 for lid in self.cfg.LANE_IDS}
+        self._emergency_triggered = False
 
         obs = self._get_observation()
         return obs, {}
@@ -381,6 +383,7 @@ class TrafficEnv(gym.Env):
             "emissions":   self._last_emissions,
             "jam_risk":    self._last_jam_risk,
             "ep_reward":   self._episode_reward,
+            "emergency_corridor_active": self._emergency_triggered,
         }
 
         if terminated:
@@ -517,12 +520,31 @@ class TrafficEnv(gym.Env):
             self.cfg.W3_JAM_PENALTY * norm_jam
         )
 
+        # ── Emergency Corridor Penalty ─────────────────────────────────────
+        yolo_data = get_yolo_data(self.cfg.LANE_IDS)
+        signal_states = self._get_signal_states()
+        self._emergency_triggered = False
+        for lid in self.cfg.LANE_IDS:
+            counts = yolo_data.get(lid, {}).get("class_counts", {})
+            if counts.get("emergency", 0) > 0:
+                if signal_states.get(lid) in ["red", "yellow"]:
+                    self._emergency_wait_tracker[lid] += 1
+                else:
+                    self._emergency_wait_tracker[lid] = 0
+            else:
+                self._emergency_wait_tracker[lid] = 0
+
+        # If any emergency vehicle has waited > 1 tick (approx 1s)
+        if any(w > 1 for w in self._emergency_wait_tracker.values()):
+            reward = -100.0
+            self._emergency_triggered = True
+
         # Cache for info dict
         self._last_wait      = total_wait
         self._last_emissions = emission_score
         self._last_jam_risk  = jam_penalty
 
-        return float(np.clip(reward, -1.0, 0.0))
+        return float(np.clip(reward, -100.0, 0.0))
 
     # ── Helpers ────────────────────────────────────────────────────────────
 

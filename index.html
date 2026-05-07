@@ -33,7 +33,7 @@ input[type=range]{width:100%;accent-color:var(--neon);cursor:pointer}
 .top-banner{text-align:center;padding:8px;font-family:'Orbitron';font-size:0.8rem;color:var(--neon);letter-spacing:4px;border-bottom:1px solid #39FF1433;margin-bottom:14px;text-shadow:0 0 10px #39FF1466}
 
 /* METRICS ROW */
-.metrics-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.metrics-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
 .metric-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;box-shadow:0 0 12px #39FF1411;text-align:center}
 .metric-card .m-label{color:var(--dim);font-size:0.65rem;letter-spacing:1px;text-transform:uppercase}
 .metric-card .m-value{font-family:'Orbitron';font-size:1.4rem;color:var(--neon);text-shadow:0 0 10px #39FF1488;margin:4px 0}
@@ -114,6 +114,7 @@ input[type=range]{width:100%;accent-color:var(--neon);cursor:pointer}
     <div class="metric-card"><div class="m-label">🎯 FPS Target</div><div class="m-value" id="mFps">10</div></div>
     <div class="metric-card"><div class="m-label">🧠 Oracle Mode</div><div class="m-value" id="mOracle" style="font-size:0.95rem;padding-top:6px">WARMUP</div></div>
     <div class="metric-card"><div class="m-label">🤖 Agent ε</div><div class="m-value" id="mEps">1.000</div></div>
+    <div class="metric-card"><div class="m-label">⚡ EVs Detected</div><div class="m-value" id="mEvs" style="color:#00FFFF;text-shadow:0 0 10px #00FFFF88">0</div></div>
   </div>
 
   <!-- ROW 1: Live Feed + Impact -->
@@ -196,53 +197,7 @@ const fCtx = fCanvas.getContext('2d');
 fCanvas.width = fCanvas.offsetWidth || 640;
 fCanvas.height = 320;
 
-function rnd(a, b) { return Math.floor(Math.random() * (b - a) + a); }
-
-function drawFeed(step) {
-  const W = fCanvas.width, H = fCanvas.height;
-  fCtx.fillStyle = '#0d0f0b';
-  fCtx.fillRect(0, 0, W, H);
-  const cx = W / 2, cy = H / 2;
-  fCtx.strokeStyle = '#1e2a1e';
-  fCtx.lineWidth = 1;
-  fCtx.beginPath(); fCtx.moveTo(cx, 0); fCtx.lineTo(cx, H); fCtx.stroke();
-  fCtx.beginPath(); fCtx.moveTo(0, cy); fCtx.lineTo(W, cy); fCtx.stroke();
-
-  // road markings
-  fCtx.strokeStyle = '#2a3a2a';
-  for (let i = 0; i < 4; i++) {
-    fCtx.strokeRect(cx - 90 + i * 40, cy - 90, 30, 30);
-  }
-
-  // vehicles
-  const n = rnd(5, 15);
-  for (let i = 0; i < n; i++) {
-    const x = rnd(20, W - 50), y = rnd(20, H - 40);
-    const bw = rnd(20, 45), bh = rnd(14, 28);
-    const conf = rnd(50, 99);
-    fCtx.strokeStyle = '#39FF14';
-    fCtx.lineWidth = 1;
-    fCtx.strokeRect(x, y, bw, bh);
-    fCtx.fillStyle = 'rgba(57,255,20,0.06)';
-    fCtx.fillRect(x, y, bw, bh);
-    fCtx.fillStyle = '#39FF14';
-    fCtx.font = '9px Share Tech Mono';
-    fCtx.fillText(`car ${conf}%`, x, y - 2);
-  }
-
-  // HUD
-  fCtx.fillStyle = '#39FF14';
-  fCtx.font = 'bold 11px Share Tech Mono';
-  fCtx.fillText(`ECOSYNC LIVE | T=${String(step).padStart(4,'0')}`, 10, 18);
-  fCtx.fillStyle = '#aaa';
-  fCtx.font = '10px Share Tech Mono';
-  fCtx.fillText(`Vehicles: ${n} | EmScore: ${(Math.random()*10+5).toFixed(1)}`, 10, 34);
-
-  // scan line effect
-  fCtx.fillStyle = 'rgba(57,255,20,0.015)';
-  const scanY = ((step * 4) % H);
-  fCtx.fillRect(0, scanY, W, 2);
-}
+// Removed drawFeed and rnd mock functions
 
 // ── Heatmap helper ───────────────────────────────────────────────────────────
 function scoreToColor(v) {
@@ -306,6 +261,7 @@ async function poll() {
     document.getElementById('mStep').textContent = d.step.toLocaleString();
     document.getElementById('mOracle').textContent = d.oracle_mode;
     document.getElementById('mEps').textContent = d.agent_epsilon.toFixed(3);
+    document.getElementById('mEvs').textContent = d.metrics.ev_count || 0;
 
     document.getElementById('impactVal').textContent = d.impact_saved.toLocaleString();
     const m = d.metrics;
@@ -338,7 +294,16 @@ async function poll() {
     updateHeatmap(d.lane_data);
 
     // Live feed
-    drawFeed(d.step);
+    if (d.yolo_frame_base64) {
+      const img = new Image();
+      img.onload = () => {
+        fCtx.drawImage(img, 0, 0, fCanvas.width, fCanvas.height);
+        fCtx.fillStyle = 'rgba(57,255,20,0.015)';
+        const scanY = ((d.step * 4) % fCanvas.height);
+        fCtx.fillRect(0, scanY, fCanvas.width, 2);
+      };
+      img.src = 'data:image/jpeg;base64,' + d.yolo_frame_base64;
+    }
     document.getElementById('feedCaption').textContent = `EcoSync Perception | Frame ${d.step}`;
 
   } catch(e) {
