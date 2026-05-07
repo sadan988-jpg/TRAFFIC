@@ -132,8 +132,8 @@ DEFAULT_LANE_IDS: List[str] = [
 ]
 
 # YOLOv8 inference settings (tuned for real-time on CPU/GPU)
-YOLO_MODEL_NAME: str  = "yolov8n.pt"   # Nano — fastest; swap to yolov8s for +mAP
-YOLO_CONF_THRESH: float = 0.35          # lower = more detections, more FP
+YOLO_MODEL_NAME: str  = "yolov8s.pt"   # Nano — fastest; swap to yolov8s for +mAP
+YOLO_CONF_THRESH: float = 0.25          # lower = more detections, more FP
 YOLO_IOU_THRESH:  float = 0.45          # NMS overlap threshold
 YOLO_IMG_SIZE:    int   = 640           # inference resolution
 
@@ -145,16 +145,17 @@ YOLO_IMG_SIZE:    int   = 640           # inference resolution
 @dataclass
 class BoundingBox:
     """Normalised [0,1] bounding box from YOLO + pixel centre."""
-    x1:       float
-    y1:       float
-    x2:       float
-    y2:       float
-    cx:       float          # pixel centroid x (absolute)
-    cy:       float          # pixel centroid y (absolute)
-    conf:     float
-    cls_id:   int
-    cls_name: str
-    is_ev:    bool = False
+    x1:           float
+    y1:           float
+    x2:           float
+    y2:           float
+    cx:           float          # pixel centroid x (absolute)
+    cy:           float          # pixel centroid y (absolute)
+    conf:         float
+    cls_id:       int
+    cls_name:     str
+    is_ev:        bool = False
+    is_ambulance: bool = False   # True when COCO class 9 (emergency) detected
 
     @property
     def area_px(self) -> float:
@@ -164,15 +165,17 @@ class BoundingBox:
 @dataclass
 class LaneDetection:
     """Per-lane detection result for one video frame."""
-    lane_id:         str
-    vehicle_count:   int               = 0
-    class_counts:    Dict[str, int]    = field(default_factory=dict)
-    emissions_score: float             = 0.0   # combined CO2+NOx proxy
-    co2_score:       float             = 0.0
-    nox_score:       float             = 0.0
-    pmx_score:       float             = 0.0
-    detections:      List[BoundingBox] = field(default_factory=list)
-    ev_count:        int               = 0
+    lane_id:          str
+    vehicle_count:    int               = 0
+    class_counts:     Dict[str, int]    = field(default_factory=dict)
+    emissions_score:  float             = 0.0   # combined CO2+NOx proxy
+    co2_score:        float             = 0.0
+    nox_score:        float             = 0.0
+    pmx_score:        float             = 0.0
+    detections:       List[BoundingBox] = field(default_factory=list)
+    ev_count:         int               = 0
+    fuel_count:       int               = 0     # non-EV vehicles in lane
+    ambulance_count:  int               = 0     # emergency vehicles in lane
 
 
 @dataclass
@@ -181,16 +184,20 @@ class FrameData:
     Complete perception output for a single captured frame.
     Fed into the LSTM sequence buffer (Phase 3).
     """
-    timestamp:        float                        # wall-clock time
-    sim_time:         float                        # SUMO simulation time (s)
-    frame_id:         int
-    fps:              float
-    raw_frame:        Optional[np.ndarray]         # BGR image (kept for debug)
-    lane_data:        Dict[str, LaneDetection]     # keyed by lane_id
-    total_vehicles:   int                = 0
-    total_evs:        int                = 0
-    total_emissions:  float              = 0.0
-    inference_ms:     float              = 0.0     # YOLO latency
+    timestamp:           float                        # wall-clock time
+    sim_time:            float                        # SUMO simulation time (s)
+    frame_id:            int
+    fps:                 float
+    raw_frame:           Optional[np.ndarray]         # BGR image (kept for debug)
+    lane_data:           Dict[str, LaneDetection]     # keyed by lane_id
+    total_vehicles:      int                = 0
+    total_evs:           int                = 0
+    total_fuel_vehicles: int                = 0       # non-EV vehicles detected
+    total_ambulances:    int                = 0       # emergency vehicles detected
+    ambulance_detected:  bool               = False   # True if any ambulance in frame
+    total_emissions:     float              = 0.0
+    co2_rate_g_per_frame: float             = 0.0    # estimated CO2 g/km for this frame
+    inference_ms:        float              = 0.0     # YOLO latency
 
     def to_live_traffic_data(self) -> Dict[str, Dict]:
         """
@@ -200,7 +207,8 @@ class FrameData:
             {
               "N_in_0": {"count": 3, "emissions_score": 4.26,
                          "co2": 3.0, "nox": 0.24, "pmx": 0.15,
-                         "class_counts": {"car": 2, "bus": 1}},
+                         "class_counts": {"car": 2, "bus": 1},
+                         "ambulance_count": 0},
               ...
             }
         """
@@ -208,6 +216,8 @@ class FrameData:
             lid: {
                 "count":           ld.vehicle_count,
                 "ev_count":        ld.ev_count,
+                "fuel_count":      ld.fuel_count,
+                "ambulance_count": ld.ambulance_count,
                 "emissions_score": round(ld.emissions_score, 4),
                 "co2":             round(ld.co2_score,       4),
                 "nox":             round(ld.nox_score,       4),
@@ -353,38 +363,64 @@ class FileCapture:
     """
     Video file capture for production prototype using cv2.VideoCapture.
     Loops automatically when reaching the end of the file.
+    Paces frame delivery to the video's native FPS so playback looks correct.
     """
-    def __init__(self, video_path: str = "traffic_video.mp4") -> None:
-        import cv2 as _cv2
+    def __init__(self, video_path: str = "traffi.mp4") -> None:
         self._video_path = video_path
-        self._cap = _cv2.VideoCapture(video_path)
+        self._cap = cv2.VideoCapture(video_path)
         if not self._cap.isOpened():
             log.error("FileCapture error: Cannot open %s", video_path)
-        
-        self._frame_id = 0
-        self._last_t = time.perf_counter()
-        self._fps = 0.0
+
+        # Read native FPS for rate-controlled frame delivery
+        self._native_fps = self._cap.get(cv2.CAP_PROP_FPS) or 25.0
+        self._native_interval = 1.0 / max(self._native_fps, 1.0)
+        self._last_grab_t = 0.0  # time of last frame delivery
+
+        self._frame_id  = 0
+        self._last_t    = time.perf_counter()
+        self._fps       = 0.0
         self._fps_alpha = 0.1
-        log.info("📷  FileCapture initialised | video=%s", video_path)
+        log.info("📷  FileCapture initialised | video=%s | native_fps=%.1f",
+                 video_path, self._native_fps)
+
+    def _reopen(self) -> bool:
+        """Re-open video from the beginning for looping."""
+        self._cap.release()
+        self._cap = cv2.VideoCapture(self._video_path)
+        opened = self._cap.isOpened()
+        if opened:
+            log.info("🔄  FileCapture looped: %s", self._video_path)
+        else:
+            log.error("FileCapture error: Failed to reopen %s", self._video_path)
+        return opened
 
     def grab(self) -> Optional[np.ndarray]:
+        """
+        Read the next frame from the video file.
+        Paces delivery to the video's native FPS — if called too fast,
+        returns None until the next frame is due. This ensures a 10s
+        video takes 10s to play through, not 3s.
+        """
+        # --- Frame-rate pacing: don't deliver faster than native FPS ---
+        now = time.perf_counter()
+        if (now - self._last_grab_t) < self._native_interval:
+            return None  # too early, caller should sleep and retry
+
         if not self._cap.isOpened():
-            return None
-            
+            if not self._reopen():
+                return None
+
         ret, frame = self._cap.read()
         if not ret:
-            # Robust loop: release and re-open
-            self._cap.release()
-            self._cap = _cv2.VideoCapture(self._video_path)
+            if not self._reopen():
+                return None
             ret, frame = self._cap.read()
             if not ret:
-                log.error("FileCapture error: Failed to loop %s", self._video_path)
                 return None
-            log.info("🔄  FileCapture looped: %s", self._video_path)
-                
-        now = time.perf_counter()
+
+        self._last_grab_t = now
         inst_fps = 1.0 / max(now - self._last_t, 1e-6)
-        self._fps = self._fps_alpha * inst_fps + (1 - self._fps_alpha) * self._fps
+        self._fps   = self._fps_alpha * inst_fps + (1 - self._fps_alpha) * self._fps
         self._last_t = now
         self._frame_id += 1
         return frame
@@ -396,15 +432,15 @@ class FileCapture:
     @property
     def frame_id(self) -> int:
         return self._frame_id
-        
+
     @property
     def region(self) -> Dict[str, int]:
-        # Return dummy region for ROIManager initialization
+        """Return frame dimensions as a region dict for ROIManager."""
         if self._cap.isOpened():
-            import cv2 as _cv2
-            w = int(self._cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(self._cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
-            return {"left": 0, "top": 0, "width": w, "height": h}
+            w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if w > 0 and h > 0:
+                return {"left": 0, "top": 0, "width": w, "height": h}
         return {"left": 0, "top": 0, "width": 1280, "height": 720}
 
 
@@ -828,11 +864,67 @@ class YOLOPerceptionEngine:
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
+    @staticmethod
+    def _detect_ev_by_plate_color(frame: np.ndarray, x1: float, y1: float,
+                                   x2: float, y2: float) -> bool:
+        """
+        Detect whether a vehicle has a GREEN number plate (Indian EV standard).
+
+        In India, Electric Vehicles carry a GREEN number plate with white text.
+        Petrol / Diesel vehicles use white (private) or yellow (commercial) plates.
+
+        Algorithm:
+          1. Extract the bottom 25% of the vehicle bounding box
+             (number plates are mounted at the front/rear, near the bottom).
+          2. Convert the crop to HSV colour space.
+          3. Threshold for Indian EV green plate colour:
+               Hue   : 35 – 90  (green band in OpenCV 0-179 scale)
+               Sat   : ≥ 60     (vivid, not washed-out)
+               Val   : ≥ 60     (not too dark)
+          4. Return True if ≥ 8 % of the crop pixels satisfy the mask.
+
+        Returns:
+            True  → vehicle has a green plate → treat as EV (zero emissions).
+            False → petrol / diesel / unknown vehicle.
+        """
+        h_frame, w_frame = frame.shape[:2]
+
+        # --- clamp bounding box to frame bounds ---
+        ix1 = max(0,       int(x1))
+        ix2 = min(w_frame, int(x2))
+        iy1 = max(0,       int(y1))
+        iy2 = min(h_frame, int(y2))
+
+        box_h = iy2 - iy1
+        box_w = ix2 - ix1
+        if box_h < 10 or box_w < 10:
+            return False  # bounding box too small to analyse
+
+        # --- crop the bottom 25 % of the bounding box (plate region) ---
+        plate_y1 = iy2 - max(6, int(box_h * 0.25))
+        plate_crop = frame[plate_y1:iy2, ix1:ix2]
+
+        if plate_crop.size == 0:
+            return False
+
+        # --- HSV threshold for Indian EV green plate ---
+        hsv = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2HSV)
+
+        # Green hue range in OpenCV (0-179): 35-90
+        lower_green = np.array([35,  60,  60], dtype=np.uint8)
+        upper_green = np.array([90, 255, 255], dtype=np.uint8)
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+
+        green_ratio = mask.sum() / 255.0 / max(mask.size, 1)
+        return green_ratio >= 0.08   # at least 8 % of plate crop is green
+
     def _run_yolo(self, frame: np.ndarray) -> List[BoundingBox]:
         """
         Run YOLOv8 inference on one BGR frame.
 
         Returns a list of BoundingBox objects filtered to vehicle classes.
+        Ambulances (COCO class 9) are explicitly flagged with is_ambulance=True.
+        EVs are detected by NUMBER PLATE COLOUR (green plate = Indian EV standard).
         """
         h, w = frame.shape[:2]
         t0   = time.perf_counter()
@@ -845,30 +937,39 @@ class YOLOPerceptionEngine:
             classes  = self._vehicle_cls_ids,
             device   = self._device,
             verbose  = False,
-            half     = (self._device != "cpu"),   # FP16 on GPU only
+            half     = (self._device != "cpu"),
             augment  = False,
             agnostic_nms = False,
         )
 
-        t1       = time.perf_counter()
+        t1 = time.perf_counter()
         self._last_inference_ms = (t1 - t0) * 1000
 
         boxes: List[BoundingBox] = []
         for r in results:
             if r.boxes is None:
                 continue
-            xyxyn = r.boxes.xyxyn.cpu().numpy()    # normalised [0,1]
+            xyxyn = r.boxes.xyxyn.cpu().numpy()
             confs = r.boxes.conf.cpu().numpy()
             clses = r.boxes.cls.cpu().numpy().astype(int)
 
             for (x1n, y1n, x2n, y2n), conf, cls_id in zip(xyxyn, confs, clses):
-                # Convert normalised → pixel absolute
                 x1 = x1n * w;  y1 = y1n * h
                 x2 = x2n * w;  y2 = y2n * h
                 cx = (x1 + x2) / 2.0
                 cy = (y1 + y2) / 2.0
                 cls_name = VEHICLE_COCO_CLASSES.get(cls_id, "car")
-                is_ev = ((int(conf * 1000) % 5) == 0) and cls_name in ["car", "bus", "truck"]
+
+                # ── Feature 3: Ambulance / Emergency Detection ──────────────
+                is_ambulance = (cls_id == 9)  # COCO class 9 = emergency vehicle
+
+                # ── Feature 2: EV Detection by NUMBER PLATE COLOUR ──────────
+                # Indian standard: Green number plate = Electric Vehicle
+                # Petrol/Diesel: White (private) or Yellow (commercial) plate
+                is_ev = False
+                if not is_ambulance and cls_name in ("car", "bus", "truck", "motorcycle"):
+                    is_ev = self._detect_ev_by_plate_color(frame, x1, y1, x2, y2)
+
                 boxes.append(BoundingBox(
                     x1=x1, y1=y1, x2=x2, y2=y2,
                     cx=cx, cy=cy,
@@ -876,6 +977,7 @@ class YOLOPerceptionEngine:
                     cls_id=cls_id,
                     cls_name=cls_name,
                     is_ev=is_ev,
+                    is_ambulance=is_ambulance,
                 ))
         return boxes
 
@@ -890,13 +992,19 @@ class YOLOPerceptionEngine:
             dets  = assigned.get(lid, [])
             sc    = scores.get(lid, {"combined": 0.0, "co2": 0.0, "nox": 0.0, "pmx": 0.0})
 
-            # Class histogram
-            cls_counts: Dict[str, int] = {}
-            ev_counts = 0
+            # Class histogram + EV / fuel / ambulance counts
+            cls_counts:     Dict[str, int] = {}
+            ev_counts     = 0
+            fuel_counts   = 0
+            ambul_counts  = 0
             for box in dets:
                 cls_counts[box.cls_name] = cls_counts.get(box.cls_name, 0) + 1
-                if box.is_ev:
+                if box.is_ambulance:
+                    ambul_counts += 1
+                elif box.is_ev:
                     ev_counts += 1
+                else:
+                    fuel_counts += 1
 
             result[lid] = LaneDetection(
                 lane_id         = lid,
@@ -908,6 +1016,8 @@ class YOLOPerceptionEngine:
                 pmx_score       = sc["pmx"],
                 detections      = dets,
                 ev_count        = ev_counts,
+                fuel_count      = fuel_counts,
+                ambulance_count = ambul_counts,
             )
         return result
 
@@ -954,20 +1064,35 @@ class YOLOPerceptionEngine:
         lane_data = self._build_lane_detections(assigned, scores)
 
         total_vehicles  = sum(ld.vehicle_count   for ld in lane_data.values())
-        total_evs       = sum(box.is_ev for box in boxes)
+        total_evs       = sum(box.is_ev        for box in boxes)
+        total_fuels     = sum(box.is_ambulance is False and box.is_ev is False for box in boxes)
+        total_ambulances= sum(box.is_ambulance for box in boxes)
         total_emissions = sum(ld.emissions_score for ld in lane_data.values())
 
+        # ── Feature 2: CO2 rate based on current vehicle mix ───────────────
+        # Weighted sum of HBEFA 4.1 CO2 g/km values for all fuel vehicles
+        co2_rate = 0.0
+        for box in boxes:
+            if box.is_ambulance or box.is_ev:
+                continue  # EVs emit 0, ambulances excluded from CO2 metric
+            w = EMISSION_WEIGHTS.get(box.cls_name, _DEFAULT_WEIGHT)
+            co2_rate += w["co2"]
+
         fd = FrameData(
-            timestamp       = t_wall,
-            sim_time        = self._sim_time,
-            frame_id        = self._frame_counter,
-            fps             = 0.0,       # filled by caller
-            raw_frame       = frame.copy() if self._keep_raw else None,
-            lane_data       = lane_data,
-            total_vehicles  = total_vehicles,
-            total_evs       = total_evs,
-            total_emissions = total_emissions,
-            inference_ms    = self._last_inference_ms,
+            timestamp            = t_wall,
+            sim_time             = self._sim_time,
+            frame_id             = self._frame_counter,
+            fps                  = 0.0,       # filled by caller
+            raw_frame            = frame.copy() if self._keep_raw else None,
+            lane_data            = lane_data,
+            total_vehicles       = total_vehicles,
+            total_evs            = int(total_evs),
+            total_fuel_vehicles  = int(total_fuels),
+            total_ambulances     = int(total_ambulances),
+            ambulance_detected   = (int(total_ambulances) > 0),
+            total_emissions      = total_emissions,
+            co2_rate_g_per_frame = co2_rate,
+            inference_ms         = self._last_inference_ms,
         )
         self._last_frame_data = fd
         return fd
@@ -996,9 +1121,19 @@ class YOLOPerceptionEngine:
     ) -> np.ndarray:
         """
         Render YOLO bounding boxes + ROI overlays + per-lane HUD on a frame.
+        Highlights ambulances with red flashing border.
         Returns annotated BGR image (does NOT show window — caller decides).
         """
         vis = frame.copy()
+
+        # ── Feature 3: Ambulance Alert Overlay ────────────────────────────
+        if frame_data.ambulance_detected:
+            # Draw thick red border around entire frame
+            h_f, w_f = vis.shape[:2]
+            cv2.rectangle(vis, (0, 0), (w_f - 1, h_f - 1), (0, 0, 255), 8)
+            cv2.putText(vis, "🚨 AMBULANCE DETECTED — CLEAR CORRIDOR",
+                        (10, h_f - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
+                        (0, 0, 255), 2, cv2.LINE_AA)
 
         # ── ROI overlay ────────────────────────────────────────────────────
         counts = {lid: ld.vehicle_count for lid, ld in frame_data.lane_data.items()}
@@ -1007,28 +1142,61 @@ class YOLOPerceptionEngine:
         # ── Bounding boxes ─────────────────────────────────────────────────
         cls_colours = {
             "car":        (200, 200, 255),
-            "bus":        (80,  220,  80),
-            "truck":      (80,  80,  220),
+            "bus":        ( 80, 220,  80),
+            "truck":      ( 80,  80, 220),
             "motorcycle": (220, 220,  80),
         }
         for box in self._cached_boxes:
-            if box.is_ev:
-                colour = (255, 255, 0) # Cyan in OpenCV (BGR)
-                label = f"EV {box.cls_name} {box.conf:.2f}"
-            else:
-                colour = cls_colours.get(box.cls_name, (200, 200, 200))
-                label = f"{box.cls_name} {box.conf:.2f}"
-            
             x1, y1, x2, y2 = int(box.x1), int(box.y1), int(box.x2), int(box.y2)
-            cv2.rectangle(vis, (x1, y1), (x2, y2), colour, 2)
+
+            if box.is_ambulance:
+                # Feature 3: Red box + AMBULANCE label
+                colour    = (0, 0, 255)
+                label     = f"AMBULANCE {box.conf:.2f}"
+                thickness = 3
+            elif box.is_ev:
+                # Feature 2: Bright green box = EV (green number plate)
+                colour    = (0, 255, 80)   # vivid green in BGR
+                label     = f"EV {box.cls_name} {box.conf:.2f}"
+                thickness = 2
+            else:
+                # Feature 1: Standard class colours (fuel vehicles)
+                colour    = cls_colours.get(box.cls_name, (200, 200, 200))
+                label     = f"{box.cls_name} {box.conf:.2f}"
+                thickness = 2
+
+            cv2.rectangle(vis, (x1, y1), (x2, y2), colour, thickness)
             cv2.putText(vis, label, (x1, max(y1 - 5, 0)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, colour, 1, cv2.LINE_AA)
 
-        # ── HUD ────────────────────────────────────────────────────────────
+            # ── Draw simulated number plate at bottom of bounding box ───────
+            plate_h    = max(5, (y2 - y1) // 6)
+            plate_y1_d = y2 - plate_h
+            plate_w    = (x2 - x1)
+
+            if box.is_ambulance:
+                plate_col = (0, 0, 255)       # red plate
+                plate_txt = "AMBU"
+            elif box.is_ev:
+                plate_col = (0, 200, 60)      # green plate (Indian EV standard)
+                plate_txt = "EV"
+            else:
+                # White plate for private fuel vehicles
+                plate_col = (220, 220, 220)
+                plate_txt = "FUEL"
+
+            cv2.rectangle(vis, (x1, plate_y1_d), (x2, y2), plate_col, -1)
+            cv2.putText(vis, plate_txt,
+                        (x1 + plate_w // 4, y2 - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.28, (0, 0, 0), 1, cv2.LINE_AA)
+
+
+        # ── HUD (Feature 1 + 2 stats) ──────────────────────────────────────
+        ev_pct = (frame_data.total_evs / max(1, frame_data.total_vehicles)) * 100
         hud_lines = [
             f"EcoSync Perception  |  Frame {frame_data.frame_id}",
-            f"SimTime: {frame_data.sim_time:.1f}s  |  YOLO: {frame_data.inference_ms:.1f}ms",
-            f"Vehicles: {frame_data.total_vehicles}  |  Emissions Score: {frame_data.total_emissions:.2f}",
+            f"Vehicles: {frame_data.total_vehicles}  |  Fuel: {frame_data.total_fuel_vehicles}  |  EV: {frame_data.total_evs} ({ev_pct:.0f}%)",
+            f"CO2 Rate: {frame_data.co2_rate_g_per_frame:.0f} g/km  |  YOLO: {frame_data.inference_ms:.1f}ms",
         ]
         for i, line in enumerate(hud_lines):
             cv2.putText(vis, line, (10, 20 + i * 18),
@@ -1072,8 +1240,8 @@ class PerceptionBridge:
         self,
         engine:       YOLOPerceptionEngine,
         capturer:     ScreenCapture,
-        buffer_size:  int   = 50,        # ring buffer depth (LSTM window + headroom)
-        target_fps:   float = 15.0,      # max capture rate
+        buffer_size:  int   = 50,
+        target_fps:   float = 15.0,
     ) -> None:
         self._engine     = engine
         self._capturer   = capturer
@@ -1081,26 +1249,39 @@ class PerceptionBridge:
         self._target_fps = target_fps
         self._interval   = 1.0 / target_fps
 
-        self._lock       = threading.Lock()
-        self._stop_event = threading.Event()
-        self._thread:    Optional[threading.Thread] = None
-        self._running    = False
+        self._lock        = threading.Lock()
+        self._stop_event  = threading.Event()
+        self._pause_event = threading.Event()   # pause support
+        self._thread:     Optional[threading.Thread] = None
+        self._running     = False
         self._current_sim_time = 0.0
 
     def set_sim_time(self, t: float) -> None:
         """Thread-safe update of simulation time."""
         self._current_sim_time = t
 
+    def set_paused(self, paused: bool) -> None:
+        """Pause or resume the capture loop. When paused, no frames are read."""
+        if paused:
+            self._pause_event.set()
+        else:
+            self._pause_event.clear()
+
     # ── Background capture loop ───────────────────────────────────────────────
 
     def _loop(self) -> None:
         log.info("🔄  PerceptionBridge capture loop started (%.0f FPS cap)", self._target_fps)
         while not self._stop_event.is_set():
+            # ── Pause: sleep while paused, don't read frames ──────────
+            if self._pause_event.is_set():
+                time.sleep(0.1)
+                continue
+
             t0 = time.perf_counter()
 
             frame = self._capturer.grab()
             if frame is None:
-                time.sleep(0.05)
+                time.sleep(0.02)  # frame-rate pacing returned None
                 continue
 
             self._engine.set_sim_time(self._current_sim_time)
@@ -1110,9 +1291,9 @@ class PerceptionBridge:
 
             with self._lock:
                 self._buffer.append(fd)
-            
+
             if self._engine._frame_counter % 50 == 0:
-                log.info("📊  PerceptionBridge: processed %d frames (current FPS: %.1f)", 
+                log.info("📊  PerceptionBridge: processed %d frames (current FPS: %.1f)",
                          self._engine._frame_counter, self._capturer.fps)
 
             elapsed = time.perf_counter() - t0
